@@ -22,6 +22,19 @@ trapinit(void)
   initlock(&tickslock, "time");
 }
 
+// unified user page-fault handler.
+// cause is 13 (load) or 15 (store). returns 0 if the fault was
+// resolved, -1 if the access is invalid.
+int
+handle_pagefault(struct proc *p, uint64 va, uint64 cause)
+{
+  if (cause != 13 && cause != 15)
+    return -1;
+  if (va >= MAXVA)
+    return -1;
+  return vmfault(p->pagetable, p->sz, va, cause == 15) ? 0 : -1;
+}
+
 // set up to take exceptions and traps while in the kernel.
 void
 trapinithart(void)
@@ -68,10 +81,9 @@ usertrap(void)
     syscall();
   } else if ((which_dev = devintr()) != 0) {
     // ok
-  } else if ((r_scause() == 15 || r_scause() == 13) &&
-             vmfault(p->pagetable, p->sz, r_stval(),
-                     (r_scause() == 13) ? 1 : 0) != 0) {
-    // page fault on lazily-allocated page
+  } else if ((r_scause() == 13 || r_scause() == 15) &&
+             handle_pagefault(p, r_stval(), r_scause()) == 0) {
+    // page fault resolved (lazy allocation or copy-on-write)
   } else {
     printk("usertrap(): unexpected scause 0x%lx pid=%d\n", r_scause(), p->pid);
     printk("            sepc=0x%lx stval=0x%lx\n", r_sepc(), r_stval());

@@ -301,7 +301,6 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
   pte_t *pte;
   uint64 pa, i;
   uint flags;
-  char *mem;
 
   for (i = 0; i < sz; i += PGSIZE) {
     if ((pte = walk(old, i, 0)) == 0)
@@ -310,18 +309,22 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
       continue; // physical page hasn't been allocated
     pa = PTE2PA(*pte);
     flags = PTE_FLAGS(*pte);
-    if ((mem = kalloc()) == 0)
-      goto err;
-    memmove(mem, (char *)pa, PGSIZE);
-    if (mappages(new, i, PGSIZE, (uint64)mem, flags) != 0) {
-      kfree(mem);
-      goto err;
+    // share the page copy-on-write: writable pages become read-only
+    // in both parent and child, and are copied on the first write.
+    if (flags & PTE_W) {
+      flags = (flags & ~PTE_W) | PTE_COW;
+      *pte = PA2PTE(pa) | flags;
     }
+    if (mappages(new, i, PGSIZE, pa, flags) != 0)
+      goto err;
+    incref((void *)pa);
   }
+  sfence_vma(); // parent PTEs lost PTE_W
   return 0;
 
 err:
   uvmunmap(new, 0, i / PGSIZE, 1);
+  sfence_vma();
   return -1;
 }
 
@@ -353,13 +356,14 @@ copyout(pagetable_t pagetable, uint64 psz, uint64 dstva, char *src, uint64 len)
       return -1;
 
     pa0 = walkaddr(pagetable, va0);
-    if (pa0 == 0) {
-      if ((pa0 = vmfault(pagetable, psz, va0, 0)) == 0) {
+    pte = pa0 ? walk(pagetable, va0, 0) : 0;
+    if (pa0 == 0 || ((*pte & PTE_W) == 0 && (*pte & PTE_COW))) {
+      // not present (lazy) or copy-on-write: fault it in for writing.
+      if ((pa0 = vmfault(pagetable, psz, va0, 1)) == 0) {
         return -1;
       }
+      pte = walk(pagetable, va0, 0);
     }
-
-    pte = walk(pagetable, va0, 0);
     // forbid copyout over read-only user text pages.
     if ((*pte & PTE_W) == 0)
       return -1;
@@ -388,7 +392,7 @@ copyin(pagetable_t pagetable, uint64 psz, char *dst, uint64 srcva, uint64 len)
     va0 = PGROUNDDOWN(srcva);
     pa0 = walkaddr(pagetable, va0);
     if (pa0 == 0) {
-      if ((pa0 = vmfault(pagetable, psz, va0, 1)) == 0) {
+      if ((pa0 = vmfault(pagetable, psz, va0, 0)) == 0) {
         return -1;
       }
     }
@@ -419,7 +423,7 @@ copyinstr(pagetable_t pagetable, uint64 psz, char *dst, uint64 srcva,
     va0 = PGROUNDDOWN(srcva);
     pa0 = walkaddr(pagetable, va0);
     if (pa0 == 0) {
-      if ((pa0 = vmfault(pagetable, psz, va0, 1)) == 0) {
+      if ((pa0 = vmfault(pagetable, psz, va0, 0)) == 0) {
         return -1;
       }
     }
@@ -451,21 +455,42 @@ copyinstr(pagetable_t pagetable, uint64 psz, char *dst, uint64 srcva,
   }
 }
 
-// allocate and map user memory if process is referencing a page
-// that was lazily allocated in sys_sbrk().
-// returns 0 if va is invalid or already mapped, or if
-// out of physical memory, and physical address if successful.
+// resolve a user page fault at va (write=1 for a store).
+// handles lazily-allocated pages (sbrk) and copy-on-write pages.
+// returns 0 if the access is invalid or out of memory, and the
+// physical address of the page if successful.
 uint64
-vmfault(pagetable_t pagetable, uint64 psz, uint64 va, int read)
+vmfault(pagetable_t pagetable, uint64 psz, uint64 va, int write)
 {
-  uint64 mem;
+  uint64 mem, pa;
+  pte_t *pte;
 
   if (va >= psz)
     return 0;
   va = PGROUNDDOWN(va);
-  if (ismapped(pagetable, va)) {
-    return 0;
+  pte = walk(pagetable, va, 0);
+
+  if (pte && (*pte & PTE_V)) {
+    // present: only a store to a COW page can be resolved.
+    if (!write || (*pte & PTE_COW) == 0 || (*pte & PTE_U) == 0)
+      return 0;
+    pa = PTE2PA(*pte);
+    if (getref((void *)pa) == 1) {
+      // last owner: just make it writable again.
+      *pte = (*pte | PTE_W) & ~PTE_COW;
+    } else {
+      if ((mem = (uint64)kalloc()) == 0)
+        return 0;
+      memmove((void *)mem, (void *)pa, PGSIZE);
+      *pte = PA2PTE(mem) | ((PTE_FLAGS(*pte) | PTE_W) & ~PTE_COW);
+      kfree((void *)pa); // drop our reference to the shared page
+      pa = mem;
+    }
+    sfence_vma();
+    return pa;
   }
+
+  // not present: lazily allocate a zeroed page.
   mem = (uint64)kalloc();
   if (mem == 0)
     return 0;
