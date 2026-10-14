@@ -851,6 +851,80 @@ killzero(char *s)
   exit(0);
 }
 
+// test that fork() shares pages copy-on-write: a child's writes must
+// not be visible to the parent, and the parent's must not reach the child.
+void
+cowtest(char *s)
+{
+  enum { NPG = 64, NKIDS = 8 };
+  char *buf = sbrk(NPG * 4096);
+  int i, k, pid, xst;
+
+  if (buf == (char *)-1) {
+    printf("%s: sbrk failed\n", s);
+    exit(1);
+  }
+  for (i = 0; i < NPG; i++)
+    buf[i * 4096] = 'p';
+
+  for (k = 0; k < NKIDS; k++) {
+    pid = fork();
+    if (pid < 0) {
+      printf("%s: fork failed\n", s);
+      exit(1);
+    }
+    if (pid == 0) {
+      for (i = 0; i < NPG; i++) {
+        if (buf[i * 4096] != 'p')
+          exit(1); // child must see the parent's data
+        buf[i * 4096] = 'c';
+      }
+      exit(0);
+    }
+    if (wait(&xst) != pid || xst != 0) {
+      printf("%s: child failed (status %d)\n", s, xst);
+      exit(1);
+    }
+    for (i = 0; i < NPG; i++) {
+      if (buf[i * 4096] != 'p') {
+        printf("%s: child's write leaked into parent\n", s);
+        exit(1);
+      }
+    }
+  }
+
+  // parent writes after fork; child must still see the old value.
+  int fds[2];
+  if (pipe(fds) < 0) {
+    printf("%s: pipe failed\n", s);
+    exit(1);
+  }
+  pid = fork();
+  if (pid == 0) {
+    char c;
+    read(fds[0], &c, 1); // wait until the parent has written
+    exit(buf[0] == 'p' ? 0 : 1);
+  }
+  buf[0] = 'P';
+  write(fds[1], "x", 1);
+  if (wait(&xst) != pid || xst != 0) {
+    printf("%s: parent's write leaked into child\n", s);
+    exit(1);
+  }
+  // kernel write (read syscall) into a COW page
+  pid = fork();
+  if (pid == 0) {
+    write(fds[1], "y", 1);
+    read(fds[0], buf + 4096, 1);
+    exit(buf[4096] == 'y' ? 0 : 1);
+  }
+  if (wait(&xst) != pid || xst != 0) {
+    printf("%s: copyout to COW page failed\n", s);
+    exit(1);
+  }
+  exit(0);
+}
+
 // meant to be run w/ at most two CPUs
 void
 preempt(char *s)
@@ -2986,6 +3060,7 @@ struct test {
   {pipe1, "pipe1"},
   {killstatus, "killstatus"},
   {killzero, "killzero"},
+  {cowtest, "cowtest"},
   {preempt, "preempt"},
   {exitwait, "exitwait"},
   {reparent, "reparent"},

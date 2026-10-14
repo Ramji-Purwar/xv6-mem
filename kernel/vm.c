@@ -202,8 +202,13 @@ uvmunmap(pagetable_t pagetable, uint64 va, uint64 npages, int do_free)
   for (a = va; a < va + npages * PGSIZE; a += PGSIZE) {
     if ((pte = walk(pagetable, a, 0)) == 0) // leaf page table entry allocated?
       continue;
-    if ((*pte & PTE_V) == 0) // has physical page been allocated?
+    if ((*pte & PTE_V) == 0) { // has physical page been allocated?
+      if (*pte & PTE_SWAP) {   // swapped out: release its swap slot
+        swapfree(PTE2SWAP(*pte));
+        *pte = 0;
+      }
       continue;
+    }
     if (do_free) {
       uint64 pa = PTE2PA(*pte);
       kfree((void *)pa);
@@ -289,6 +294,8 @@ uvmfree(pagetable_t pagetable, uint64 sz)
   freewalk(pagetable);
 }
 
+static uint64 swapfault(pte_t *pte);
+
 // Given a parent process's page table, copy
 // its memory into a child's page table.
 // Copies both the page table and the
@@ -305,8 +312,10 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
   for (i = 0; i < sz; i += PGSIZE) {
     if ((pte = walk(old, i, 0)) == 0)
       continue; // page table entry hasn't been allocated
-    if ((*pte & PTE_V) == 0)
+    if ((*pte & PTE_V) == 0 && (*pte & PTE_SWAP) == 0)
       continue; // physical page hasn't been allocated
+    if ((*pte & PTE_V) == 0 && swapfault(pte) == 0)
+      goto err; // bring swapped page back so it can be shared
     pa = PTE2PA(*pte);
     flags = PTE_FLAGS(*pte);
     // share the page copy-on-write: writable pages become read-only
@@ -455,6 +464,21 @@ copyinstr(pagetable_t pagetable, uint64 psz, char *dst, uint64 srcva,
   }
 }
 
+// bring the page of a swapped-out PTE back into a fresh frame and make
+// the PTE valid again. returns its physical address, or 0 if out of memory.
+static uint64
+swapfault(pte_t *pte)
+{
+  uint64 mem = (uint64)kalloc();
+
+  if (mem == 0)
+    return 0;
+  swapin(PTE2SWAP(*pte), (void *)mem);
+  *pte = PA2PTE(mem) | (PTE_FLAGS(*pte) & ~PTE_SWAP) | PTE_V;
+  sfence_vma();
+  return mem;
+}
+
 // resolve a user page fault at va (write=1 for a store).
 // handles lazily-allocated pages (sbrk) and copy-on-write pages.
 // returns 0 if the access is invalid or out of memory, and the
@@ -469,6 +493,14 @@ vmfault(pagetable_t pagetable, uint64 psz, uint64 va, int write)
     return 0;
   va = PGROUNDDOWN(va);
   pte = walk(pagetable, va, 0);
+
+  if (pte && (*pte & PTE_V) == 0 && (*pte & PTE_SWAP)) {
+    // swapped out: bring it back, then fall through for a COW write.
+    if ((pa = swapfault(pte)) == 0)
+      return 0;
+    if (!write || (*pte & PTE_COW) == 0)
+      return pa;
+  }
 
   if (pte && (*pte & PTE_V)) {
     // present: only a store to a COW page can be resolved.

@@ -19,6 +19,7 @@ OBJS = \
   $K/syscall.o \
   $K/sysproc.o \
   $K/bio.o \
+  $K/swap.o \
   $K/fs.o \
   $K/log.o \
   $K/sleeplock.o \
@@ -151,8 +152,11 @@ UPROGS=\
 	$U/_dorphan\
 	$U/_sync\
 
-fs.img: mkfs/mkfs README $(UPROGS)
+fs.img: mkfs/mkfs README.md $(UPROGS)
+	# user programs (usertests) open the file as "README"
+	cp README.md README
 	mkfs/mkfs fs.img README $(UPROGS)
+	rm -f README
 
 -include kernel/*.d user/*.d
 

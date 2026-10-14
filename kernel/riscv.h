@@ -398,6 +398,11 @@ typedef uint64 *pagetable_t; // 512 PTEs
 #define PTE_X (1L << 3)
 #define PTE_U (1L << 4) // user can access
 #define PTE_COW (1L << 8) // copy-on-write page (RSW bit)
+#define PTE_SWAP (1L << 9) // page is in swap; PTE_V clear, slot in PPN field
+// PTE for a page swapped out to slot, keeping its permission bits.
+#define SWAP2PTE(slot, flags) \
+  (((uint64)(slot) << 10) | PTE_SWAP | ((flags) & 0x3FF & ~PTE_V))
+#define PTE2SWAP(pte) ((int)((pte) >> 10))
 
 // shift a physical address to the right place for a PTE.
 #define PA2PTE(pa) ((((uint64)pa) >> 12) << 10)

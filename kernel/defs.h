@@ -56,6 +56,12 @@ int             writei(struct inode*, int, uint64, uint, uint);
 void            itrunc(struct inode*);
 void            ireclaim(int);
 
+// swap.c
+void            swapinit(void);
+int             swapout(void *pa);
+void            swapin(int slot, void *pa);
+void            swapfree(int slot);
+
 // kalloc.c
 void*           kalloc(void);
 void            kfree(void *);

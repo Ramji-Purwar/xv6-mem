@@ -10,5 +10,8 @@
 #define LOGBLOCKS   (MAXOPBLOCKS * 3) // max data blocks in on-disk log
 #define NBUF        (MAXOPBLOCKS * 3) // size of disk block cache
 #define FSSIZE      2000              // size of file system in blocks
+#define SWAPPAGES   1024              // pages of swap space
+#define SWAPSTART   FSSIZE            // first swap block, right after the fs
+#define SWAPBLOCKS  (SWAPPAGES * 4)   // 4 blocks of BSIZE per 4096-byte page
 #define MAXPATH     128               // maximum file path name
 #define USERSTACK   1                 // user stack pages

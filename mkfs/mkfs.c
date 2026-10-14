@@ -111,7 +111,8 @@ main(int argc, char *argv[])
 
   freeblock = nmeta; // the first free block that we can allocate
 
-  for (i = 0; i < FSSIZE; i++)
+  // file system blocks, followed by the swap area (see param.h).
+  for (i = 0; i < FSSIZE + SWAPBLOCKS; i++)
     wsect(i, zeroes);
 
   memset(buf, 0, sizeof(buf));
